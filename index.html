@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RUM Large Payload & Uncompressed Asset Test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    button { padding: 10px 20px; margin: 5px; cursor: pointer; font-size: 14px; }
+    #log { background: #1a1a1a; color: #0f0; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 13px; max-height: 400px; overflow-y: auto; white-space: pre-wrap; }
+    .controls { margin: 20px 0; }
+    label { display: block; margin: 8px 0; }
+    input[type="number"] { width: 120px; padding: 4px 8px; }
+    .info { background: #f0f4ff; border: 1px solid #ccd; padding: 12px; border-radius: 6px; font-size: 13px; margin: 16px 0; }
+    .info code { background: #e0e4ee; padding: 2px 5px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>RUM Large Payload & Uncompressed Asset Test</h1>
+
+  <div class="info">
+    <strong>Backend detection (quickwit-consumer) checks:</strong><br>
+    1. <code>http.response_content_length</code> > 300KB (set automatically by OTel HTTP instrumentation from <code>Content-Length</code> header)<br>
+    2. Span duration > 100ms (inherent in the span)<br>
+    3. URL not a static asset (<code>_next/static/</code>, <code>_next/data/</code>, static extensions except <code>.json</code>)
+  </div>
+
+  <div class="controls">
+    <label>Request body size (KB): <input type="number" id="sizeKb" value="500" min="1" max="10000"></label>
+    <label>Number of requests: <input type="number" id="reqCount" value="5" min="1" max="100"></label>
+    <label>Delay between requests (ms): <input type="number" id="delayMs" value="200" min="0" max="10000"></label>
+    <label>Server response delay (ms): <input type="number" id="serverDelay" value="150" min="0" max="30000"></label>
+    <label>Response size (KB): <input type="number" id="respSizeKb" value="350" min="1" max="10000"></label>
+  </div>
+
+  <div>
+    <button onclick="fireRequests('POST')">POST large payloads</button>
+    <button onclick="fireRequests('PUT')">PUT large payloads</button>
+    <button onclick="fireRequests('PATCH')">PATCH large payloads</button>
+    <button onclick="fireXHR()">XHR large payloads</button>
+    <button onclick="fireFetchStream()">Streaming fetch</button>
+    <button onclick="navigateWithEcho()">Load page with /echo20 (page-load resource)</button>
+    <button onclick="clearLog()">Clear log</button>
+  </div>
+
+  <hr>
+
+  <h2>Uncompressed Asset Detection</h2>
+
+  <div class="info">
+    <strong>Backend detection (quickwit-consumer) checks:</strong><br>
+    1. <code>mw.span.category</code> = <code>resource.script</code> or <code>resource.css</code><br>
+    2. <code>http.response.body.decoded_size</code> > 512KB (fallback: <code>http.decoded_response_content_length</code>)<br>
+    3. <code>http.response.body.size</code> == decoded size — no compression applied (fallback: <code>http.response_content_length</code>)<br>
+    4. Span duration >= 300ms<br>
+    5. <code>browser.name</code> is Chrome, Firefox, Safari, or Edge<br>
+    6. Asset URL ends with <code>.js</code>, <code>.css</code>, or <code>.json</code> (from <code>http.url</code> / <code>url.full</code>)<br>
+    7. <code>http.response.transfer_size</code> > 0 and >= encoded size (not cached)
+  </div>
+
+  <div class="controls">
+    <label>Uncompressed asset size (KB): <input type="number" id="assetSizeKb" value="600" min="100" max="10000"></label>
+    <label>Server response delay (ms): <input type="number" id="assetDelay" value="350" min="0" max="30000"></label>
+  </div>
+
+  <div>
+    <button onclick="navigateWithAsset('js')">Load page with uncompressed JS (&gt;512KB)</button>
+    <button onclick="navigateWithAsset('css')">Load page with uncompressed CSS (&gt;512KB)</button>
+    <button onclick="navigateWithAsset('both')">Load page with both (triggers detection)</button>
+  </div>
+
+  <hr>
+
+  <h2>Trace Issue Detection (on flush)</h2>
+
+  <div class="info">
+    The RUM SDK does not send the attributes these detectors read, so this page adds them to the
+    SDK's spans from the browser's <code>PerformanceResourceTiming</code> just before each span ends:
+    <code>network.protocol.version</code>, <code>http.request.fetch_start</code>, <code>http.request.request_start</code>,
+    <code>resource.render_blocking_status</code>, <code>http.response.body.size</code>, <code>resource.type</code>
+    and <code>fcp</code> on the documentLoad span. Use Chrome (it reports <code>renderBlockingStatus</code>).<br><br>
+    <strong>HTTP/1.1 Overhead:</strong> &ge; 5 overlapping HTTP/1.1 requests to one host under the documentLoad span,
+    each queued (requestStart &minus; fetchStart) &ge; 500ms.<br>
+    <strong>Large Render Blocking Asset:</strong> blocking CSS/JS &ge; 1MB, FCP between 2s and 10s,
+    asset load &ge; 33% of FCP.
+  </div>
+
+  <div class="controls">
+    <label>Overhead: number of same-host scripts: <input type="number" id="overheadCount" value="12" min="6" max="60"></label>
+    <label>Overhead: server delay per script (ms): <input type="number" id="overheadDelay" value="2000" min="0" max="30000"></label>
+    <label>Render blocking: CSS server delay (ms): <input type="number" id="blockingDelay" value="3000" min="0" max="9000"></label>
+  </div>
+
+  <div>
+    <button onclick="navigateWithOverhead()">Load page with queued HTTP/1.1 scripts (HTTP overhead)</button>
+    <button onclick="navigateWithBlocking()">Load page with 1.5MB blocking CSS (render blocking)</button>
+  </div>
+
+  <div class="info" id="assetStatus" style="display:none; background:#fff3cd; border-color:#ffc107;">
+    <!-- filled by JS on load if asset query params are present -->
+  </div>
+
+  <h3>Log</h3>
+  <div id="log"></div>
+
+  <script>
+    // Must run before the SDK loads: get notified the moment the SDK registers its tracer provider
+    // on the OTel global, so the span patch is in place before the documentLoad spans end.
+    (function hookOtelRegistry() {
+      const sym = Symbol.for('opentelemetry.js.api.1');
+      const onTrace = () => queueMicrotask(() => installDetectorAttrPatch());
+      let registry;
+      Object.defineProperty(globalThis, sym, {
+        configurable: true,
+        get() { return registry; },
+        set(value) {
+          if (!value || typeof value !== 'object') { registry = value; return; }
+          registry = new Proxy(value, {
+            set(target, key, val) {
+              target[key] = val;
+              if (key === 'trace') onTrace();
+              return true;
+            },
+          });
+          if (value.trace) onTrace();
+        },
+      });
+    })();
+
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.middleware.io/browser/libs/0.0.2/middleware-rum.min.js';
+    script.type = 'text/javascript';
+    script.crossOrigin = 'anonymous';
+    document.head.appendChild(script);
+
+    function setResponseContentLength(span, request, response) {
+      if (!response) return;
+      let contentLength = 0;
+      if (response.headers && typeof response.headers.get === 'function') {
+        contentLength = parseInt(response.headers.get('content-length') || '0', 10);
+      } else if (typeof response.getResponseHeader === 'function') {
+        contentLength = parseInt(response.getResponseHeader('content-length') || '0', 10);
+      }
+      if (contentLength > 0) {
+        span.setAttribute('http.response_content_length', contentLength);
+        span.setAttribute('http.response.body.size', contentLength);
+      }
+    }
+
+    // details here are used to identify the service in the Middleware dashboard.
+    // create a rum app in the dashboard and paste the details below.
+    script.onload = function () {
+      if (window.Middleware) {
+        const trackError = Middleware.track({
+          serviceName: "rum-app",
+          projectName: "rum-app",
+
+          accountKey:"your-account-key",
+          target: "https://your-target.middleware.io",
+
+          tracePropagationTargets: [/.*/],
+          defaultAttributes: {
+            "app.version": "1.0.0",
+          },
+          FetchInstrumentation: {
+            applyCustomAttributesOnSpan: setResponseContentLength,
+          },
+          XMLHttpRequestInstrumentation: {
+            applyCustomAttributesOnSpan: setResponseContentLength,
+          },
+        });
+        if (trackError) { log(`RUM SDK did not start: ${trackError}`); return; }
+        log('RUM SDK loaded and tracking');
+        installDetectorAttrPatch();
+      }
+    };
+
+    // ── Detector attribute patch ──
+    // Wraps the SDK Span's end() so resource and documentLoad spans get the attributes the
+    // HTTP/1.1 Overhead and Render Blocking Asset detectors need. Values come from the real
+    // PerformanceResourceTiming entry of the loaded URL, nothing is made up.
+    // Called when the SDK registers its provider, and as a polling fallback after track().
+    let detectorPatchInstalled = false;
+    function installDetectorAttrPatch(attempt = 0) {
+      if (detectorPatchInstalled) return;
+      if (tryPatchSpanEnd()) {
+        detectorPatchInstalled = true;
+        log('Detector patch installed on SDK spans');
+        return;
+      }
+      if (attempt >= 200) { log('Detector patch: SDK tracer provider not found after 10s'); return; }
+      setTimeout(() => installDetectorAttrPatch(attempt + 1), 50);
+    }
+
+    function tryPatchSpanEnd() {
+      const api = globalThis[Symbol.for('opentelemetry.js.api.1')];
+      if (!api || !api.trace) return false;
+      const probe = api.trace.getTracer('detector-attr-patch').startSpan('detector-attr-probe');
+      // a NoopTracer returns a NonRecordingSpan without attributes - the real SDK is not registered yet
+      if (!probe || !('attributes' in probe)) return false;
+      const proto = Object.getPrototypeOf(probe);
+      if (typeof proto.end !== 'function') return false;
+      if (proto.__detectorPatched) return true;
+      const originalEnd = proto.end;
+      proto.end = function (endTime) {
+        try { enrichSpan(this); } catch (e) { console.warn('detector patch', e); }
+        return originalEnd.call(this, endTime);
+      };
+      proto.__detectorPatched = true;
+      return true;
+    }
+
+    function enrichSpan(span) {
+      const attrs = span.attributes || {};
+      const isDocLoad = attrs['event.type'] === 'load' || (span.name || '').startsWith('documentLoad');
+      if (isDocLoad) {
+        const fcp = performance.getEntriesByName('first-contentful-paint')[0];
+        if (fcp) span.setAttribute('fcp', Math.round(fcp.startTime));
+        log(`Span enriched: ${span.name} fcp=${span.attributes['fcp']}`);
+        return;
+      }
+      if (attrs['event.type'] !== 'resource') return;
+      const url = attrs['url.full'] || attrs['http.url'];
+      if (!url) return;
+      const entries = performance.getEntriesByName(url, 'resource');
+      const e = entries[entries.length - 1];
+      if (!e) return;
+
+      if (e.nextHopProtocol) span.setAttribute('network.protocol.version', e.nextHopProtocol);
+      if (e.requestStart > 0) {
+        span.setAttribute('http.request.fetch_start', e.fetchStart);
+        span.setAttribute('http.request.request_start', e.requestStart);
+      }
+      if (e.renderBlockingStatus) span.setAttribute('resource.render_blocking_status', e.renderBlockingStatus);
+      if (e.encodedBodySize > 0 && attrs['http.response.body.size'] === undefined) {
+        span.setAttribute('http.response.body.size', e.encodedBodySize);
+      }
+      // ingest sets mw.span.category=http for these spans, so the detectors identify assets by resource.type
+      const path = new URL(url).pathname;
+      if (e.initiatorType === 'link' || /\.css$/i.test(path)) span.setAttribute('resource.type', 'css');
+      else if (e.initiatorType === 'script' || /\.js$/i.test(path)) span.setAttribute('resource.type', 'js');
+      const a = span.attributes;
+      log(`Span enriched: ${path} type=${a['resource.type']} proto=${a['network.protocol.version']} ` +
+        `queued=${Math.round(e.requestStart - e.fetchStart)}ms blocking=${a['resource.render_blocking_status']} size=${a['http.response.body.size']}`);
+    }
+
+    const logEl = document.getElementById('log');
+    function log(msg) {
+      const ts = new Date().toISOString().slice(11, 23);
+      logEl.textContent += `[${ts}] ${msg}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function clearLog() { logEl.textContent = ''; }
+
+    function generatePayload(sizeKb) {
+      const chunk = 'A'.repeat(1024);
+      let payload = '';
+      for (let i = 0; i < sizeKb; i++) payload += chunk;
+      return JSON.stringify({ data: payload, ts: Date.now() });
+    }
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    async function fireRequests(method) {
+      const sizeKb = +document.getElementById('sizeKb').value;
+      const count = +document.getElementById('reqCount').value;
+      const delay = +document.getElementById('delayMs').value;
+      const serverDelay = +document.getElementById('serverDelay').value;
+      const respSizeKb = +document.getElementById('respSizeKb').value;
+      const payload = generatePayload(sizeKb);
+      const url = `/echo20?size=${respSizeKb}&delay=${serverDelay}`;
+
+      log(`Firing ${count}x ${method}, ~${sizeKb}KB body, expecting ~${respSizeKb}KB response, ${serverDelay}ms server delay`);
+
+      for (let i = 0; i < count; i++) {
+        const start = performance.now();
+        try {
+          const res = await fetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+          });
+          const elapsed = performance.now() - start;
+          const contentLength = parseInt(res.headers.get('content-length') || '0', 10);
+          log(`  ${method} #${i + 1}: ${res.status} — ${(contentLength / 1024).toFixed(1)}KB, ${elapsed.toFixed(0)}ms`);
+        } catch (e) {
+          log(`  ${method} #${i + 1}: ERROR ${e.message}`);
+        }
+        if (delay > 0 && i < count - 1) await sleep(delay);
+      }
+      log(`Done: ${count}x ${method}`);
+    }
+
+    async function fireXHR() {
+      const sizeKb = +document.getElementById('sizeKb').value;
+      const count = +document.getElementById('reqCount').value;
+      const delay = +document.getElementById('delayMs').value;
+      const serverDelay = +document.getElementById('serverDelay').value;
+      const respSizeKb = +document.getElementById('respSizeKb').value;
+      const payload = generatePayload(sizeKb);
+      const url = `/echo20?size=${respSizeKb}&delay=${serverDelay}`;
+
+      log(`Firing ${count}x XHR POST, ~${sizeKb}KB body, expecting ~${respSizeKb}KB response`);
+
+      for (let i = 0; i < count; i++) {
+        await new Promise((resolve) => {
+          const start = performance.now();
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', url);
+          xhr.setRequestHeader('Content-Type', 'application/json');
+          xhr.onload = () => {
+            const elapsed = performance.now() - start;
+            const contentLength = parseInt(xhr.getResponseHeader('content-length') || '0', 10);
+            log(`  XHR #${i + 1}: ${xhr.status} — ${(contentLength / 1024).toFixed(1)}KB, ${elapsed.toFixed(0)}ms`);
+            resolve();
+          };
+          xhr.onerror = () => { log(`  XHR #${i + 1}: ERROR`); resolve(); };
+          xhr.send(payload);
+        });
+        if (delay > 0 && i < count - 1) await sleep(delay);
+      }
+      log('Done: XHR');
+    }
+
+    // ── Uncompressed Asset functions ──
+    // Navigate to same page with query params so assets load during page load
+    // (document-load instrumentation captures them as resource.script / resource.css spans)
+
+    function navigateWithAsset(type) {
+      const sizeKb = +document.getElementById('assetSizeKb').value;
+      const delay = +document.getElementById('assetDelay').value;
+      window.location.href = `/?asset=${type}&size=${sizeKb}&delay=${delay}`;
+    }
+
+    // Reload with /echo20 injected into <head> as a page-load resource, same as the
+    // uncompressed assets, so it gets a document-load resource span
+    function navigateWithEcho() {
+      const sizeKb = +document.getElementById('respSizeKb').value;
+      const delay = +document.getElementById('serverDelay').value;
+      window.location.href = `/?asset=echo&size=${sizeKb}&delay=${delay}`;
+    }
+
+    function navigateWithOverhead() {
+      const count = +document.getElementById('overheadCount').value;
+      const delay = +document.getElementById('overheadDelay').value;
+      window.location.href = `/?asset=overhead&count=${count}&delay=${delay}`;
+    }
+
+    function navigateWithBlocking() {
+      const delay = +document.getElementById('blockingDelay').value;
+      window.location.href = `/?asset=blocking&delay=${delay}`;
+    }
+
+    // On page load: show status if assets were loaded via query params
+    (function() {
+      const params = new URLSearchParams(window.location.search);
+      const assetType = params.get('asset');
+      if (!assetType) return;
+
+      const size = params.get('size') || '600';
+      const delay = params.get('delay') || '350';
+      const statusEl = document.getElementById('assetStatus');
+      statusEl.style.display = 'block';
+
+      const lines = ['<strong>Assets loaded on this page load:</strong><br>'];
+      if (assetType === 'js' || assetType === 'both') {
+        lines.push(`Uncompressed JS: <code>/assets/large-uncompressed.js?size=${size}&delay=${delay}</code> (~${size}KB, ${delay}ms delay)<br>`);
+      }
+      if (assetType === 'css' || assetType === 'both') {
+        lines.push(`Uncompressed CSS: <code>/assets/large-uncompressed.css?size=${size}&delay=${delay}</code> (~${size}KB, ${delay}ms delay)<br>`);
+      }
+      if (assetType === 'echo') {
+        lines.push(`Echo endpoint: <code>/echo20?size=${size}&delay=${delay}</code> (~${size}KB response, ${delay}ms delay)<br>`);
+      }
+      if (assetType === 'overhead') {
+        lines.push(`HTTP/1.1 overhead: <code>${params.get('count') || 12}x /assets/slow.js?delay=${delay}</code> (all same host)<br>`);
+      }
+      if (assetType === 'blocking') {
+        lines.push(`Render blocking CSS: <code>/assets/large-uncompressed.css?delay=${delay}</code> (~1.5MB, in &lt;head&gt;)<br>`);
+      }
+      if (assetType === 'both') {
+        lines.push(`Compressed sibling: <code>/assets/small-compressed.js</code> (gzipped)<br>`);
+      }
+      lines.push('<br>Check MW dashboard for <code>resource.script</code> / <code>resource.css</code> spans with PerformanceResourceTiming attributes.');
+      statusEl.innerHTML = lines.join('');
+
+      // Log the PerformanceResourceTiming entries after assets finish loading
+      window.addEventListener('load', () => {
+        setTimeout(() => {
+          const entries = performance.getEntriesByType('resource').filter(e =>
+            e.name.includes('/assets/large-uncompressed') || e.name.includes('/assets/small-compressed') ||
+            e.name.includes('/echo20') || e.name.includes('/assets/slow.js')
+          );
+          entries.forEach(e => {
+            log(`PerformanceResourceTiming: ${e.name.replace(location.origin, '')}`);
+            log(`  decodedBodySize: ${e.decodedBodySize}, encodedBodySize: ${e.encodedBodySize}, transferSize: ${e.transferSize}`);
+            log(`  duration: ${e.duration.toFixed(0)}ms, protocol: ${e.nextHopProtocol}, renderBlocking: ${e.renderBlockingStatus}, queued: ${(e.requestStart - e.fetchStart).toFixed(0)}ms`);
+          });
+          const fcp = performance.getEntriesByName('first-contentful-paint')[0];
+          if (fcp) log(`FCP: ${fcp.startTime.toFixed(0)}ms`);
+          if (assetType === 'overhead') {
+            const queued = entries.filter(e => e.requestStart - e.fetchStart >= 500).length;
+            log(`Requests queued >= 500ms: ${queued} (detector needs >= 5)`);
+          }
+          if (entries.length === 0) {
+            log('No PerformanceResourceTiming entries found for asset URLs');
+          }
+        }, 500);
+      });
+    })();
+
+    async function fireFetchStream() {
+      const sizeKb = +document.getElementById('sizeKb').value;
+      const serverDelay = +document.getElementById('serverDelay').value;
+      const respSizeKb = +document.getElementById('respSizeKb').value;
+      const payload = generatePayload(sizeKb);
+      const url = `/echo20?size=${respSizeKb}&delay=${serverDelay}`;
+
+      log(`Streaming fetch POST, ~${sizeKb}KB body, expecting ~${respSizeKb}KB response`);
+      try {
+        const start = performance.now();
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+        });
+        const reader = res.body.getReader();
+        let totalBytes = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          totalBytes += value.length;
+        }
+        const elapsed = performance.now() - start;
+        log(`  Stream complete: ${(totalBytes / 1024).toFixed(1)}KB, ${elapsed.toFixed(0)}ms`);
+      } catch (e) {
+        log(`  Stream ERROR: ${e.message}`);
+      }
+    }
+  </script>
+</body>
+</html>
