@@ -74,11 +74,8 @@
   <h2>Trace Issue Detection (on flush)</h2>
 
   <div class="info">
-    The RUM SDK does not send the attributes these detectors read, so this page adds them to the
-    SDK's spans from the browser's <code>PerformanceResourceTiming</code> just before each span ends:
-    <code>network.protocol.version</code>, <code>http.request.fetch_start</code>, <code>http.request.request_start</code>,
-    <code>resource.render_blocking_status</code>, <code>http.response.body.size</code>, <code>resource.type</code>
-    and <code>fcp</code> on the documentLoad span. Use Chrome (it reports <code>renderBlockingStatus</code>).<br><br>
+    This page sends only what the RUM SDK (0.0.2) emits by default. No custom attributes, hooks or span patches are added,
+    so these detectors only fire if the SDK itself provides the attributes they read.<br><br>
     <strong>HTTP/1.1 Overhead:</strong> &ge; 5 overlapping HTTP/1.1 requests to one host under the documentLoad span,
     each queued (requestStart &minus; fetchStart) &ge; 500ms.<br>
     <strong>Large Render Blocking Asset:</strong> blocking CSS/JS &ge; 1MB, FCP between 2s and 10s,
@@ -104,145 +101,30 @@
   <div id="log"></div>
 
   <script>
-    // Must run before the SDK loads: get notified the moment the SDK registers its tracer provider
-    // on the OTel global, so the span patch is in place before the documentLoad spans end.
-    (function hookOtelRegistry() {
-      const sym = Symbol.for('opentelemetry.js.api.1');
-      const onTrace = () => queueMicrotask(() => installDetectorAttrPatch());
-      let registry;
-      Object.defineProperty(globalThis, sym, {
-        configurable: true,
-        get() { return registry; },
-        set(value) {
-          if (!value || typeof value !== 'object') { registry = value; return; }
-          registry = new Proxy(value, {
-            set(target, key, val) {
-              target[key] = val;
-              if (key === 'trace') onTrace();
-              return true;
-            },
-          });
-          if (value.trace) onTrace();
-        },
-      });
-    })();
-
     const script = document.createElement('script');
     script.src = 'https://cdnjs.middleware.io/browser/libs/0.0.2/middleware-rum.min.js';
     script.type = 'text/javascript';
     script.crossOrigin = 'anonymous';
     document.head.appendChild(script);
 
-    function setResponseContentLength(span, request, response) {
-      if (!response) return;
-      let contentLength = 0;
-      if (response.headers && typeof response.headers.get === 'function') {
-        contentLength = parseInt(response.headers.get('content-length') || '0', 10);
-      } else if (typeof response.getResponseHeader === 'function') {
-        contentLength = parseInt(response.getResponseHeader('content-length') || '0', 10);
-      }
-      if (contentLength > 0) {
-        span.setAttribute('http.response_content_length', contentLength);
-        span.setAttribute('http.response.body.size', contentLength);
-      }
-    }
-
     // details here are used to identify the service in the Middleware dashboard.
     // create a rum app in the dashboard and paste the details below.
     script.onload = function () {
       if (window.Middleware) {
         const trackError = Middleware.track({
-          serviceName: "rum-app",
-          projectName: "rum-app",
-
+          serviceName:"rum-app",
+          projectName:"rum-app",
           accountKey:"your-account-key",
           target: "https://your-target.middleware.io",
-
           tracePropagationTargets: [/.*/],
           defaultAttributes: {
             "app.version": "1.0.0",
           },
-          FetchInstrumentation: {
-            applyCustomAttributesOnSpan: setResponseContentLength,
-          },
-          XMLHttpRequestInstrumentation: {
-            applyCustomAttributesOnSpan: setResponseContentLength,
-          },
-        });
+        })
         if (trackError) { log(`RUM SDK did not start: ${trackError}`); return; }
         log('RUM SDK loaded and tracking');
-        installDetectorAttrPatch();
       }
     };
-
-    // ── Detector attribute patch ──
-    // Wraps the SDK Span's end() so resource and documentLoad spans get the attributes the
-    // HTTP/1.1 Overhead and Render Blocking Asset detectors need. Values come from the real
-    // PerformanceResourceTiming entry of the loaded URL, nothing is made up.
-    // Called when the SDK registers its provider, and as a polling fallback after track().
-    let detectorPatchInstalled = false;
-    function installDetectorAttrPatch(attempt = 0) {
-      if (detectorPatchInstalled) return;
-      if (tryPatchSpanEnd()) {
-        detectorPatchInstalled = true;
-        log('Detector patch installed on SDK spans');
-        return;
-      }
-      if (attempt >= 200) { log('Detector patch: SDK tracer provider not found after 10s'); return; }
-      setTimeout(() => installDetectorAttrPatch(attempt + 1), 50);
-    }
-
-    function tryPatchSpanEnd() {
-      const api = globalThis[Symbol.for('opentelemetry.js.api.1')];
-      if (!api || !api.trace) return false;
-      const probe = api.trace.getTracer('detector-attr-patch').startSpan('detector-attr-probe');
-      // a NoopTracer returns a NonRecordingSpan without attributes - the real SDK is not registered yet
-      if (!probe || !('attributes' in probe)) return false;
-      const proto = Object.getPrototypeOf(probe);
-      if (typeof proto.end !== 'function') return false;
-      if (proto.__detectorPatched) return true;
-      const originalEnd = proto.end;
-      proto.end = function (endTime) {
-        try { enrichSpan(this); } catch (e) { console.warn('detector patch', e); }
-        return originalEnd.call(this, endTime);
-      };
-      proto.__detectorPatched = true;
-      return true;
-    }
-
-    function enrichSpan(span) {
-      const attrs = span.attributes || {};
-      const isDocLoad = attrs['event.type'] === 'load' || (span.name || '').startsWith('documentLoad');
-      if (isDocLoad) {
-        const fcp = performance.getEntriesByName('first-contentful-paint')[0];
-        if (fcp) span.setAttribute('fcp', Math.round(fcp.startTime));
-        log(`Span enriched: ${span.name} fcp=${span.attributes['fcp']}`);
-        return;
-      }
-      if (attrs['event.type'] !== 'resource') return;
-      const url = attrs['url.full'] || attrs['http.url'];
-      if (!url) return;
-      const entries = performance.getEntriesByName(url, 'resource');
-      const e = entries[entries.length - 1];
-      if (!e) return;
-
-      if (e.nextHopProtocol) span.setAttribute('network.protocol.version', e.nextHopProtocol);
-      if (e.requestStart > 0) {
-        span.setAttribute('http.request.fetch_start', e.fetchStart);
-        span.setAttribute('http.request.request_start', e.requestStart);
-      }
-      if (e.renderBlockingStatus) span.setAttribute('resource.render_blocking_status', e.renderBlockingStatus);
-      if (e.encodedBodySize > 0 && attrs['http.response.body.size'] === undefined) {
-        span.setAttribute('http.response.body.size', e.encodedBodySize);
-      }
-      // ingest sets mw.span.category=http for these spans, so the detectors identify assets by resource.type
-      const path = new URL(url).pathname;
-      if (e.initiatorType === 'link' || /\.css$/i.test(path)) span.setAttribute('resource.type', 'css');
-      else if (e.initiatorType === 'script' || /\.js$/i.test(path)) span.setAttribute('resource.type', 'js');
-      const a = span.attributes;
-      log(`Span enriched: ${path} type=${a['resource.type']} proto=${a['network.protocol.version']} ` +
-        `queued=${Math.round(e.requestStart - e.fetchStart)}ms blocking=${a['resource.render_blocking_status']} size=${a['http.response.body.size']}`);
-    }
 
     const logEl = document.getElementById('log');
     function log(msg) {
