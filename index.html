@@ -41,6 +41,7 @@
     <button onclick="fireFetchStream()">Streaming fetch</button>
     <button onclick="navigateWithEcho()">Load page with /echo20 (page-load resource)</button>
     <button onclick="clearLog()">Clear log</button>
+    <button onclick="sendSentryTestError()">Throw Sentry test error</button>
   </div>
 
   <hr>
@@ -100,6 +101,30 @@
   <h3>Log</h3>
   <div id="log"></div>
 
+  <!-- Sentry browser SDK (errors + tracing). Loaded synchronously and initialised before the
+       Middleware RUM SDK so both SDKs instrument the same fetch/XHR calls and receive the same spans. -->
+  <script
+    src="https://browser.sentry-cdn.com/10.50.0/bundle.tracing.min.js"
+    integrity="sha384-Z5Lh8aHnw5OtqBTOO26KfKOVhHSO99nZttBX8d9VOVAqt3/9JoWlpqs3CE0EZG4M"
+    crossorigin="anonymous"
+  ></script>
+  <script>
+    // Replace with the DSN of your Sentry project (Settings > Projects > Client Keys).
+    const SENTRY_DSN = 'https://33e8381508efdf0be549437217a59b09@o4511812711153664.ingest.us.sentry.io/4511946909351936';
+
+    if (window.Sentry && SENTRY_DSN !== 'YOUR_SENTRY_DSN') {
+      Sentry.init({
+        dsn: SENTRY_DSN,
+        release: 'rum-app@1.0.0',
+        environment: 'prod',
+        integrations: [Sentry.browserTracingIntegration()],
+        // 100% for this test app; lower it for real traffic.
+        tracesSampleRate: 1.0,
+        tracePropagationTargets: ['localhost'],
+      });
+    }
+  </script>
+
   <script>
     const script = document.createElement('script');
     script.src = 'https://cdnjs.middleware.io/browser/libs/0.0.2/middleware-rum.min.js';
@@ -112,10 +137,27 @@
     script.onload = function () {
       if (window.Middleware) {
         const trackError = Middleware.track({
-          serviceName:"rum-app",
-          projectName:"rum-app",
-          accountKey:"your-account-key",
-          target: "https://your-target.middleware.io",
+
+          // serviceName:"span-issue-detection",
+          // projectName:"span-issue-detection",
+          // accountKey:"dremgxeyebcnsjayutvsitocpazcdojexvvi",
+          // target: "https://sandbox.middleware.io",
+
+          // serviceName:"ShoppingReactAppTestWithoutSoruceMap",
+          // projectName:"ShoppingReactAppTestWithoutSoruceMap",
+          // accountKey:"munuugmapdolbccxjrviaeckhlgjtfhpfsie",
+          // target: "https://hwhwq.middleware.io",
+
+          // serviceName:"ShoppingReactAppTestWithoutSoruceMap",
+          // projectName:"ShoppingReactAppTestWithoutSoruceMap",
+          // accountKey:"munuugmapdolbccxjrviaeckhlgjtfhpfsie",
+          // target: "https://hwhwq.middleware.io",
+
+          serviceName:"web",
+          projectName:"web",
+          accountKey:"xnyxzdvghgtkhpwjhcaydoralkgdjehfcyzi",
+          target: "https://kbuin-zif.beta.env.middleware.io",
+
           tracePropagationTargets: [/.*/],
           defaultAttributes: {
             "app.version": "1.0.0",
@@ -133,6 +175,11 @@
       logEl.scrollTop = logEl.scrollHeight;
     }
     function clearLog() { logEl.textContent = ''; }
+    function sendSentryTestError() {
+      if (!window.Sentry || !Sentry.getClient()) { log('Sentry is not initialised (set SENTRY_DSN)'); return; }
+      Sentry.captureException(new Error('Sentry test error from rum-large-payload-test'));
+      log('Sentry test error sent');
+    }
 
     function generatePayload(sizeKb) {
       const chunk = 'A'.repeat(1024);
